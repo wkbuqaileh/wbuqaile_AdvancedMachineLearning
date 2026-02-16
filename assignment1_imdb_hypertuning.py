@@ -1,0 +1,199 @@
+
+# If you get an import error, install in the SAME environment as your kernel:
+# pip install tensorflow matplotlib pandas numpy
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, regularizers
+from tensorflow.keras.datasets import imdb
+
+print("TensorFlow:", tf.__version__)
+
+
+
+# Data params
+max_features = 10000  # only consider top 10k words
+(x_train, y_train), (x_test, y_test) = imdb.load_data(num_words=max_features)
+
+def vectorize_sequences(sequences, dimension=max_features):
+    results = np.zeros((len(sequences), dimension), dtype="float32")
+    for i, seq in enumerate(sequences):
+        results[i, seq] = 1.0
+    return results
+
+x_train = vectorize_sequences(x_train)
+x_test  = vectorize_sequences(x_test)
+
+y_train = np.asarray(y_train).astype("float32")
+y_test  = np.asarray(y_test).astype("float32")
+
+print("x_train:", x_train.shape, "x_test:", x_test.shape)
+
+
+
+def build_model(
+    num_layers=2,
+    units=16,
+    activation="relu",
+    loss="binary_crossentropy",
+    dropout_rate=0.0,
+    l2_reg=0.0,
+    learning_rate=1e-3,
+):
+    model = keras.Sequential()
+    model.add(layers.Input(shape=(max_features,)))
+
+    reg = regularizers.l2(l2_reg) if l2_reg and l2_reg > 0 else None
+
+    for _ in range(num_layers):
+        model.add(layers.Dense(units, activation=activation, kernel_regularizer=reg))
+        if dropout_rate and dropout_rate > 0:
+            model.add(layers.Dropout(dropout_rate))
+
+    model.add(layers.Dense(1, activation="sigmoid"))
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        loss=loss,
+        metrics=["accuracy"],
+    )
+    return model
+
+def train_and_eval(cfg, epochs=20, batch_size=512, verbose=0):
+    model = build_model(**cfg)
+    callbacks = [
+        keras.callbacks.EarlyStopping(
+            monitor="val_accuracy", patience=2, restore_best_weights=True
+        )
+    ]
+    history = model.fit(
+        x_train, y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_split=0.2,
+        callbacks=callbacks,
+        verbose=verbose,
+    )
+    test_loss, test_acc = model.evaluate(x_test, y_test, verbose=0)
+
+    best_val_acc = float(np.max(history.history["val_accuracy"]))
+    best_epoch = int(np.argmax(history.history["val_accuracy"]) + 1)
+
+    row = dict(cfg)
+    row.update({
+        "best_val_acc": best_val_acc,
+        "best_epoch": best_epoch,
+        "test_acc": float(test_acc),
+        "test_loss": float(test_loss),
+        "epochs_ran": len(history.history["accuracy"]),
+    })
+    return row, history
+
+
+
+# Experiment grid (edit freely)
+layer_options = [1, 2, 3]
+unit_options  = [32, 64, 128]
+activation_options = ["relu", "tanh"]
+loss_options = ["binary_crossentropy", "mse"]
+
+# Regularization / dropout options
+dropout_options = [0.0, 0.2, 0.5]
+l2_options = [0.0, 1e-4]
+
+configs = []
+for num_layers in layer_options:
+    for units in unit_options:
+        for activation in activation_options:
+            for loss in loss_options:
+                for dropout_rate in dropout_options:
+                    for l2_reg in l2_options:
+                        configs.append({
+                            "num_layers": num_layers,
+                            "units": units,
+                            "activation": activation,
+                            "loss": loss,
+                            "dropout_rate": dropout_rate,
+                            "l2_reg": l2_reg,
+                            "learning_rate": 1e-3,
+                        })
+
+print("Total configs:", len(configs))
+
+results = []
+histories = {}  # optional: store a few histories for plotting learning curves
+
+for i, cfg in enumerate(configs, start=1):
+    row, hist = train_and_eval(cfg, epochs=20, batch_size=512, verbose=0)
+    results.append(row)
+
+    # Store history for a small sample (first few) to avoid memory bloat
+    if i <= 6:
+        histories[i] = hist.history
+
+    if i % 10 == 0:
+        print(f"Finished {i}/{len(configs)}")
+
+results_df = pd.DataFrame(results).sort_values(["best_val_acc", "test_acc"], ascending=False)
+results_df.head(10)
+
+
+
+os.makedirs("outputs", exist_ok=True)
+csv_path = os.path.join("outputs", "results.csv")
+results_df.to_csv(csv_path, index=False)
+print("Saved:", csv_path)
+
+best = results_df.iloc[0].to_dict()
+best
+
+
+
+top_n = 12
+top = results_df.head(top_n).copy()
+top["label"] = (
+    "L" + top["num_layers"].astype(str) +
+    "_U" + top["units"].astype(str) +
+    "_" + top["activation"] +
+    "_" + top["loss"] +
+    "_D" + top["dropout_rate"].astype(str) +
+    "_L2" + top["l2_reg"].astype(str)
+)
+
+plt.figure(figsize=(12,5))
+plt.bar(range(len(top)), top["best_val_acc"])
+plt.xticks(range(len(top)), top["label"], rotation=75, ha="right")
+plt.ylabel("Best Validation Accuracy")
+plt.title(f"Top {top_n} configs by Validation Accuracy")
+plt.tight_layout()
+plot_path = os.path.join("outputs", "top_val_acc.png")
+plt.savefig(plot_path, dpi=200)
+plt.show()
+print("Saved:", plot_path)
+
+
+
+def nice(x):
+    if isinstance(x, float):
+        return f"{x:.4f}"
+    return str(x)
+
+print("BEST CONFIG FOUND")
+for k in ["num_layers","units","activation","loss","dropout_rate","l2_reg","learning_rate","best_epoch","best_val_acc","test_acc"]:
+    print(f"- {k}: {nice(best[k])}")
+
+# A short narrative template:
+story = f"""In this IMDB sentiment task, I compared architectures by varying the number of hidden layers (1–3),
+hidden units (32–128), activation (ReLU vs tanh), loss (binary crossentropy vs MSE), and adding
+regularization (dropout and L2). The best configuration used {int(best['num_layers'])} hidden layer(s)
+with {int(best['units'])} units per layer, {best['activation']} activation, and {best['loss']} loss. With
+dropout={best['dropout_rate']} and L2={best['l2_reg']}, the model achieved best validation accuracy
+of {best['best_val_acc']:.4f} and test accuracy of {best['test_acc']:.4f}."""
+
+print("\nDRAFT STORY (edit):\n")
+print(story)
